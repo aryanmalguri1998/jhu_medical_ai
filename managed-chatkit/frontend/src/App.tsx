@@ -485,7 +485,7 @@ export default function App() {
         <section className="hero-card">
           <div>
             <p className="badge">Vertigo Agent Workbench</p>
-            <h1>Build and verify clinical agent workflows</h1>
+            <h1>Johns Hopkins vertigo triage assistant</h1>
             <p className="subtitle">
               Parse clinician spreadsheets locally, tune prompts, call the
               backend agent, and reconcile against real ground truth without
