@@ -55,6 +55,13 @@ const MAX_AGENT_PATIENTS = 5;
 
 type Stage = "landing" | "upload" | "configure";
 
+type AgentProgressStatus = "pending" | "success" | "error";
+
+type AgentProgressMap = Record<
+  string,
+  { status: AgentProgressStatus; message?: string }
+>;
+
 const envApiBase = (() => {
   const raw = import.meta.env.VITE_API_URL;
   if (typeof raw !== "string") {
@@ -86,6 +93,27 @@ const getPatientIdFromRecord = (record: PatientRecord): string => {
   );
 };
 
+const mergeAgentPatientResults = (
+  existing: AgentPatientResult[],
+  additions: AgentPatientResult[]
+): AgentPatientResult[] => {
+  if (!additions.length) {
+    return existing;
+  }
+  const map = new Map<string, AgentPatientResult>();
+  existing.forEach((entry, index) => {
+    const key =
+      normalizePatientIdentifier(entry.patient_id) || `existing-${index}`;
+    map.set(key, entry);
+  });
+  additions.forEach((entry, index) => {
+    const key =
+      normalizePatientIdentifier(entry.patient_id) || `incoming-${index}`;
+    map.set(key, entry);
+  });
+  return Array.from(map.values());
+};
+
 export default function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [stage, setStage] = useState<Stage>("landing");
@@ -99,7 +127,7 @@ export default function App() {
   const [rangeEnd, setRangeEnd] = useState(1);
   const [instructions, setInstructions] = useState(DEFAULT_INSTRUCTIONS);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
-  const [agentResponse, setAgentResponse] = useState<unknown>(null);
+  const [agentResponses, setAgentResponses] = useState<unknown[]>([]);
   const [agentPatients, setAgentPatients] = useState<AgentPatientResult[]>([]);
   const [patientOutcomes, setPatientOutcomes] = useState<PatientOutcomeEntry[]>(
     []
@@ -116,9 +144,14 @@ export default function App() {
     {}
   );
   const [agentError, setAgentError] = useState<string | null>(null);
+  const [agentProgress, setAgentProgress] = useState<AgentProgressMap>({});
   const [runningAgent, setRunningAgent] = useState(false);
 
   const hasPatients = patients.length > 0;
+  const agentProgressEntries = Object.entries(agentProgress);
+  const completedRuns = agentProgressEntries.filter(
+    ([, entry]) => entry.status === "success"
+  ).length;
 
   const stageIndex = useMemo(() => {
     if (stage === "configure") return 3;
@@ -154,8 +187,6 @@ export default function App() {
     return JSON.stringify(trimmed, null, 2);
   }, [selectedRange]);
 
-  const tableRows = useMemo(() => patients.slice(0, 50), [patients]);
-
   const dynamicColumns = useMemo(() => {
     const visible = TABLE_COLUMNS.filter((column) =>
       patients.some((entry) => entry[column] !== undefined)
@@ -190,8 +221,9 @@ export default function App() {
     if (!files?.length) return;
     setUploading(true);
     setStatusMessage(null);
-    setAgentResponse(null);
+    setAgentResponses([]);
     setAgentError(null);
+    setAgentProgress({});
     try {
       const file = files[0];
       const body = new FormData();
@@ -211,6 +243,7 @@ export default function App() {
       setGroundTruth(payload.groundTruth ?? []);
       setRangeStart(1);
       setRangeEnd(Math.max(parsedPatients.length, 1));
+      setAgentPatients([]);
       setStage("configure");
       setStatusMessage(
         `Parsed ${parsedPatients.length} patient rows from ${file.name}`
@@ -328,37 +361,75 @@ export default function App() {
           patientIdSet.has(normalizePatientIdentifier(row["Patient#"]))
         )
       : groundTruth;
+    const descriptors = limitedPatients.map((patient, index) => {
+      const fallbackId = String(rangeStart + index);
+      const patientId = getPatientIdFromRecord(patient) || fallbackId;
+      return { patient, progressKey: patientId };
+    });
+
+    const initialProgress = descriptors.reduce<AgentProgressMap>(
+      (acc, descriptor) => {
+        acc[descriptor.progressKey] = { status: "pending" };
+        return acc;
+      },
+      {}
+    );
+
     setRunningAgent(true);
     setAgentError(null);
-    setAgentResponse(null);
+    setAgentResponses([]);
     setAgentPatients([]);
     setPatientOutcomes([]);
     setOutcomeSummary(null);
     setOutcomeStatuses({});
     setOutcomeSending({});
+    setAgentProgress(initialProgress);
+
     try {
-      const response = await fetch(buildApiUrl("/api/run-agent"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          patients: limitedPatients,
-          groundTruth: filteredGroundTruth,
-          instructions,
-          limit: MAX_AGENT_PATIENTS,
-        }),
-      });
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(payload.detail ?? payload.error ?? "Agent run failed");
-      }
-      const responsePatients: AgentPatientResult[] =
-        payload.output?.patients ?? [];
-      setAgentPatients(responsePatients);
-      setAgentResponse(payload);
-    } catch (error) {
-      setAgentError(
-        error instanceof Error ? error.message : "Agent run failed"
+      const tasks = descriptors.map(({ patient, progressKey }) =>
+        (async () => {
+          try {
+            const response = await fetch(buildApiUrl("/api/run-agent"), {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                patients: [patient],
+                groundTruth: filteredGroundTruth,
+                instructions,
+                limit: 1,
+              }),
+            });
+            const payload = await response.json().catch(() => ({}));
+            if (!response.ok) {
+              throw new Error(
+                payload.detail ?? payload.error ?? "Agent run failed"
+              );
+            }
+            const responsePatients: AgentPatientResult[] =
+              payload.output?.patients ?? [];
+            if (responsePatients.length) {
+              setAgentPatients((prev) =>
+                mergeAgentPatientResults(prev, responsePatients)
+              );
+            }
+            setAgentResponses((prev) => [...prev, payload]);
+            setAgentProgress((prev) => ({
+              ...prev,
+              [progressKey]: { status: "success" },
+            }));
+          } catch (error) {
+            const message =
+              error instanceof Error ? error.message : "Agent run failed";
+            setAgentProgress((prev) => ({
+              ...prev,
+              [progressKey]: { status: "error", message },
+            }));
+            setAgentError(message);
+          }
+        })()
       );
+
+      await Promise.all(tasks);
     } finally {
       setRunningAgent(false);
     }
@@ -367,6 +438,10 @@ export default function App() {
   const loadSampleWorkbook = async () => {
     setUploading(true);
     setStatusMessage("Loading curated workbook...");
+    setAgentResponses([]);
+    setAgentPatients([]);
+    setAgentProgress({});
+    setAgentError(null);
     try {
       const response = await fetch(buildApiUrl("/api/sample-data"));
       const payload = await response.json().catch(() => ({}));
@@ -561,10 +636,7 @@ export default function App() {
               <header>
                 <div>
                   <p className="badge subtle">Parsed Patient Rows</p>
-                  <h3>
-                    {Math.min(tableRows.length, patients.length)} of{" "}
-                    {patients.length} records
-                  </h3>
+                  <h3>{patients.length} records</h3>
                 </div>
                 <div className="range-inputs">
                   <label>
@@ -614,7 +686,7 @@ export default function App() {
                     </tr>
                   </thead>
                   <tbody>
-                    {tableRows.map((row, index) => (
+                    {patients.map((row, index) => (
                       <tr key={`${row["Patient#"] ?? index}-${index}`}>
                         {dynamicColumns.map((column) => (
                           <td key={column}>
@@ -626,9 +698,7 @@ export default function App() {
                   </tbody>
                 </table>
               </div>
-              <p className="helper-text">
-                Showing first {tableRows.length} of {patients.length} records
-              </p>
+              <p className="helper-text">Showing {patients.length} records</p>
             </div>
 
             <div className="prompt-panel">
@@ -708,6 +778,38 @@ export default function App() {
               {agentError && (
                 <p className="status-message error">{agentError}</p>
               )}
+              {agentProgressEntries.length > 0 && (
+                <div className="agent-progress">
+                  <div className="preview-header">
+                    <p>Run progress</p>
+                    <span className="badge subtle">
+                      {completedRuns}/{agentProgressEntries.length} completed
+                    </span>
+                  </div>
+                  <ul className="agent-progress-list">
+                    {agentProgressEntries.map(([patientId, progress]) => {
+                      const label = /^patient/i.test(patientId)
+                        ? patientId
+                        : `Patient ${patientId}`;
+                      let statusLabel = "Running...";
+                      if (progress.status === "success") {
+                        statusLabel = "Completed";
+                      } else if (progress.status === "error") {
+                        statusLabel = progress.message ?? "Failed";
+                      }
+                      return (
+                        <li
+                          key={patientId}
+                          className={`agent-progress-item ${progress.status}`}
+                        >
+                          <span>{label}</span>
+                          <span>{statusLabel}</span>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </div>
+              )}
 
               <div className="payload-preview">
                 <div className="preview-header">
@@ -744,13 +846,16 @@ export default function App() {
               <div className="response-panel">
                 <div className="preview-header">
                   <p>Agent Response</p>
-                  {agentResponse && (
-                    <span className="badge subtle">Latest</span>
+                  {agentResponses.length > 0 && (
+                    <span className="badge subtle">
+                      {agentResponses.length} payload
+                      {agentResponses.length > 1 ? "s" : ""}
+                    </span>
                   )}
                 </div>
                 <pre>
-                  {agentResponse
-                    ? JSON.stringify(agentResponse, null, 2)
+                  {agentResponses.length
+                    ? JSON.stringify(agentResponses, null, 2)
                     : "Results will appear here after the agent run completes."}
                 </pre>
                 <div className="outcome-panel">

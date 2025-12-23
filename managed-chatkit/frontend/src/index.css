@@ -279,11 +279,6 @@ button {
   background: var(--accent-soft);
 }
 
-.tile-title {
-  margin: 0;
-  font-weight: 600;
-}
-
 .tile-description {
   margin: 0.2rem 0 0;
   color: var(--ink-muted);
@@ -428,6 +423,22 @@ button {
   margin-top: 1rem;
   border-radius: 18px;
   border: 1px solid var(--border);
+  max-height: 420px;
+  background: white;
+}
+
+.table-scroll table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.9rem;
+  min-width: 720px;
+}
+
+.table-scroll thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--card-muted);
 }
 
 table {
@@ -512,6 +523,51 @@ button.secondary {
   border-radius: 18px;
   background: var(--card-muted);
   padding: 1rem;
+}
+
+.agent-progress {
+  margin-top: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--card-muted);
+  padding: 1rem;
+}
+
+.agent-progress-list {
+  list-style: none;
+  margin: 0.75rem 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.agent-progress-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  border-radius: 14px;
+  padding: 0.65rem 0.85rem;
+  border: 1px solid var(--border);
+  background: white;
+  font-size: 0.9rem;
+  gap: 1rem;
+}
+
+.agent-progress-item.pending span:last-child {
+  color: var(--ink-muted);
+}
+
+.agent-progress-item.success span:last-child {
+  color: #0b8a3e;
+}
+
+.agent-progress-item.error {
+  border-color: rgba(255, 99, 132, 0.4);
+}
+
+.agent-progress-item.error span:last-child {
+  color: #bb0a21;
 }
 
 .preview-header {

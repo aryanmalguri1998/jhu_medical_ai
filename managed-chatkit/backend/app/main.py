@@ -41,6 +41,25 @@ SYMPTOM_FIELDS = [
 GROUND_TRUTH_FIELDS = ["True Stroke?", "Stroke Risk"]
 MAX_AGENT_BATCH = 5
 
+SINGLE_SEGMENT_FIELDS = {
+    "Age",
+    "Race",
+    "Sex",
+    "Insurance",
+    "Suden Onset Vertigo",
+    "Positional Vertigo",
+    "Dizziness that is reproducible with standing",
+    "BMI",
+    "Years of Diabetes",
+    "Atrial Fibrillation?",
+    "Smoker?",
+    "Prior Stroke?",
+    "Ataxia on finger-nose-finger?",
+    "Direction-changing nystagmus?",
+    "Skew Devaition?",
+    "Head Impulse Test?",
+}
+
 load_dotenv()
 
 
@@ -368,7 +387,7 @@ def parse_transposed_matrix(dataframe: pd.DataFrame) -> tuple[list[dict[str, Any
             normalized_value = normalize_value(raw_value)
             if not normalized_value:
                 continue
-            record[normalized_label] = normalized_value
+            append_record_value(record, normalized_label, normalized_value)
         if record:
             record["_row_index"] = column_index
             records.append(record)
@@ -385,7 +404,7 @@ def parse_rowwise_matrix(dataframe: pd.DataFrame) -> tuple[list[dict[str, Any]],
             normalized_value = normalize_value(value)
             if not key or not normalized_value:
                 continue
-            record[key] = normalized_value
+            append_record_value(record, key, normalized_value)
         if record:
             record["_row_index"] = int(index)
             records.append(record)
@@ -409,6 +428,7 @@ def finalize_patient_records(
         record["originalRowIndex"] = row_index
         record["Symptoms"] = build_symptom_summary(record)
         record["Note"] = build_note(record, patient_id)
+        clean_single_segment_fields(record)
 
         true_stroke = record.pop("True Stroke?", None)
         stroke_risk = record.pop("Stroke Risk", None) or record.pop(
@@ -426,6 +446,14 @@ def finalize_patient_records(
         patients.append(record)
 
     return patients, ground_truth
+
+
+def clean_single_segment_fields(record: dict[str, Any]) -> None:
+    for field in SINGLE_SEGMENT_FIELDS:
+        value = record.get(field)
+        if not value:
+            continue
+        record[field] = extract_primary_segment(value)
 
 
 def normalize_label_key(label: str) -> str:
@@ -452,6 +480,18 @@ def normalize_value(value: Any) -> str:
         return ""
     text = str(value).strip()
     return text
+
+
+def append_record_value(record: dict[str, Any], key: str, value: str) -> None:
+    """Merge duplicate columns by concatenating their contents."""
+
+    if not value:
+        return
+    existing = record.get(key)
+    if existing:
+        record[key] = f"{existing} | {value}"
+    else:
+        record[key] = value
 
 
 def build_symptom_summary(record: Mapping[str, Any]) -> str:
