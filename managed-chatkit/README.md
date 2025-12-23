@@ -24,6 +24,7 @@ What happens:
 - `VITE_CHATKIT_WORKFLOW_ID`
 - (optional) `CHATKIT_API_BASE` or `VITE_CHATKIT_API_BASE` (defaults to `https://api.openai.com`)
 - (optional) `VITE_API_URL` (override the dev proxy target for `/api`)
+- Export your Agent Builder workflow to `backend/app/workflow_export.py` (or set `WORKFLOW_MODULE` to a module path) so `/api/run-agent` can execute it locally via the Agents SDK.
 
 Set the env vars in your shell (or process manager) before running. Use a
 workflow id from Agent Builder (starts with `wf_...`) and an API key from the
