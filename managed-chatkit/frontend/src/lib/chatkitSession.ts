@@ -1,6 +1,16 @@
 const readEnvString = (value: unknown): string | undefined =>
   typeof value === "string" && value.trim() ? value.trim() : undefined;
 
+const apiBase = (() => {
+  const raw = readEnvString(import.meta.env.VITE_API_URL);
+  return raw ? raw.replace(/\/$/, "") : "";
+})();
+
+const defaultSessionEndpoint = (() => {
+  const path = "/api/create-session";
+  return apiBase ? `${apiBase}${path}` : path;
+})();
+
 export const workflowId = (() => {
   const id = readEnvString(import.meta.env.VITE_CHATKIT_WORKFLOW_ID);
   if (!id || id.startsWith("wf_replace")) {
@@ -11,7 +21,7 @@ export const workflowId = (() => {
 
 export function createClientSecretFetcher(
   workflow: string,
-  endpoint = "/api/create-session"
+  endpoint = defaultSessionEndpoint
 ) {
   return async (currentSecret: string | null) => {
     if (currentSecret) return currentSecret;

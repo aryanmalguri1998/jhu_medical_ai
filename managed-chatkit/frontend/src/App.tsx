@@ -55,6 +55,20 @@ const MAX_AGENT_PATIENTS = 5;
 
 type Stage = "landing" | "upload" | "configure";
 
+const envApiBase = (() => {
+  const raw = import.meta.env.VITE_API_URL;
+  if (typeof raw !== "string") {
+    return "";
+  }
+  const trimmed = raw.trim();
+  return trimmed ? trimmed.replace(/\/$/, "") : "";
+})();
+
+const buildApiUrl = (path: string) => {
+  const normalized = path.startsWith("/") ? path : `/${path}`;
+  return envApiBase ? `${envApiBase}${normalized}` : normalized;
+};
+
 const normalizePatientIdentifier = (
   value: string | number | boolean | undefined | null
 ): string => {
@@ -182,7 +196,7 @@ export default function App() {
       const file = files[0];
       const body = new FormData();
       body.append("file", file);
-      const response = await fetch("/api/patient-data", {
+      const response = await fetch(buildApiUrl("/api/patient-data"), {
         method: "POST",
         body,
       });
@@ -268,7 +282,7 @@ export default function App() {
     setOutcomeSending((prev) => ({ ...prev, [entry.patientId]: true }));
     setOutcomeStatuses((prev) => ({ ...prev, [entry.patientId]: null }));
     try {
-      const response = await fetch("/api/outcome-prompt", {
+      const response = await fetch(buildApiUrl("/api/outcome-prompt"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -323,7 +337,7 @@ export default function App() {
     setOutcomeStatuses({});
     setOutcomeSending({});
     try {
-      const response = await fetch("/api/run-agent", {
+      const response = await fetch(buildApiUrl("/api/run-agent"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -354,7 +368,7 @@ export default function App() {
     setUploading(true);
     setStatusMessage("Loading curated workbook...");
     try {
-      const response = await fetch("/api/sample-data");
+      const response = await fetch(buildApiUrl("/api/sample-data"));
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
         throw new Error(
