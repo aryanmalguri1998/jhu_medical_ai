@@ -435,37 +435,6 @@ export default function App() {
     }
   };
 
-  const loadSampleWorkbook = async () => {
-    setUploading(true);
-    setStatusMessage("Loading curated workbook...");
-    setAgentResponses([]);
-    setAgentPatients([]);
-    setAgentProgress({});
-    setAgentError(null);
-    try {
-      const response = await fetch(buildApiUrl("/api/sample-data"));
-      const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        throw new Error(
-          payload.detail ?? payload.error ?? "Unable to load sample data"
-        );
-      }
-      setPatients(payload.patients ?? []);
-      setGroundTruth(payload.groundTruth ?? []);
-      setRangeStart(1);
-      setRangeEnd(Math.max((payload.patients ?? []).length, 1));
-      setStage("configure");
-      setActiveIngestion("excel");
-      setStatusMessage("Loaded curated sample workbook");
-    } catch (error) {
-      setStatusMessage(
-        error instanceof Error ? error.message : "Sample load failed"
-      );
-    } finally {
-      setUploading(false);
-    }
-  };
-
   return (
     <div className="app-shell">
       <header className="jhu-header">
@@ -562,13 +531,6 @@ export default function App() {
                 manually.
               </p>
             </div>
-            <button
-              type="button"
-              className="secondary"
-              onClick={loadSampleWorkbook}
-            >
-              Load curated sample workbook
-            </button>
           </div>
           <div className="ingestion-options">
             <button
