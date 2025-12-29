@@ -7,6 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
+import { utils as XLSXUtils, writeFile as writeXlsxFile } from "xlsx";
 import {
   AgentPatientResult,
   GroundTruthRow,
@@ -51,7 +52,7 @@ Output:
 - Assign a probability for stroke (0-100) for each patient.
 - Compare your assessment against the provided ground truth and explain disagreements.`;
 
-const MAX_AGENT_PATIENTS = 5;
+const AGENT_BATCH_SIZE = 5;
 
 type Stage = "landing" | "upload" | "configure";
 
@@ -152,6 +153,7 @@ export default function App() {
   const completedRuns = agentProgressEntries.filter(
     ([, entry]) => entry.status === "success"
   ).length;
+  const canDownloadExcel = agentPatients.length > 0;
 
   const stageIndex = useMemo(() => {
     if (stage === "configure") return 3;
@@ -183,9 +185,19 @@ export default function App() {
 
   const payloadPreview = useMemo(() => {
     if (!selectedRange.length) return "[]";
-    const trimmed = selectedRange.slice(0, MAX_AGENT_PATIENTS);
+    const trimmed = selectedRange.slice(0, AGENT_BATCH_SIZE);
     return JSON.stringify(trimmed, null, 2);
   }, [selectedRange]);
+
+  const groundTruthMap = useMemo(() => {
+    return groundTruth.reduce<Record<string, GroundTruthRow>>((acc, row) => {
+      const key = normalizePatientIdentifier(row["Patient#"]);
+      if (key) {
+        acc[key] = row;
+      }
+      return acc;
+    }, {});
+  }, [groundTruth]);
 
   const dynamicColumns = useMemo(() => {
     const visible = TABLE_COLUMNS.filter((column) =>
@@ -283,23 +295,14 @@ export default function App() {
     const normalized = Math.max(1, Math.min(value, maxPatientsCount));
     setRangeStart(normalized);
     setRangeEnd((prev) => {
-      const minEnd = normalized;
-      const maxEnd = Math.min(
-        normalized + MAX_AGENT_PATIENTS - 1,
-        maxPatientsCount
-      );
-      const ensuredMin = Math.max(prev, minEnd);
-      return Math.min(ensuredMin, maxEnd);
+      const ensuredMin = Math.max(prev, normalized);
+      return Math.min(ensuredMin, maxPatientsCount);
     });
   };
 
   const clampRangeEnd = (value: number) => {
     const maxPatientsCount = Math.max(patients.length, 1);
-    const maxEnd = Math.min(
-      rangeStart + MAX_AGENT_PATIENTS - 1,
-      maxPatientsCount
-    );
-    const normalized = Math.max(rangeStart, Math.min(value, maxEnd));
+    const normalized = Math.max(rangeStart, Math.min(value, maxPatientsCount));
     setRangeEnd(normalized);
   };
 
@@ -349,23 +352,39 @@ export default function App() {
 
   const runAgent = async () => {
     if (!selectedRange.length) return;
-    const limitedPatients = selectedRange.slice(0, MAX_AGENT_PATIENTS);
-    if (!limitedPatients.length) return;
+
+    const descriptors = selectedRange.map((patient, index) => {
+      const fallbackId = String(rangeStart + index);
+      const patientId = getPatientIdFromRecord(patient);
+      return {
+        patient,
+        progressKey: patientId || fallbackId,
+        patientId,
+      };
+    });
+    if (!descriptors.length) return;
+
+    type PatientDescriptor = (typeof descriptors)[number];
+
     const patientIdSet = new Set(
-      limitedPatients
-        .map((entry) => getPatientIdFromRecord(entry))
-        .filter((value) => value.length > 0)
+      descriptors
+        .map((descriptor) => descriptor.patientId)
+        .filter((value): value is string => Boolean(value))
     );
     const filteredGroundTruth = patientIdSet.size
       ? groundTruth.filter((row) =>
           patientIdSet.has(normalizePatientIdentifier(row["Patient#"]))
         )
       : groundTruth;
-    const descriptors = limitedPatients.map((patient, index) => {
-      const fallbackId = String(rangeStart + index);
-      const patientId = getPatientIdFromRecord(patient) || fallbackId;
-      return { patient, progressKey: patientId };
-    });
+
+    const batches: PatientDescriptor[][] = [];
+    for (
+      let cursor = 0;
+      cursor < descriptors.length;
+      cursor += AGENT_BATCH_SIZE
+    ) {
+      batches.push(descriptors.slice(cursor, cursor + AGENT_BATCH_SIZE));
+    }
 
     const initialProgress = descriptors.reduce<AgentProgressMap>(
       (acc, descriptor) => {
@@ -374,6 +393,20 @@ export default function App() {
       },
       {}
     );
+
+    const markProgress = (
+      keys: string[],
+      status: AgentProgressStatus,
+      message?: string
+    ) => {
+      setAgentProgress((prev) => {
+        const next = { ...prev };
+        keys.forEach((key) => {
+          next[key] = message ? { status, message } : { status };
+        });
+        return next;
+      });
+    };
 
     setRunningAgent(true);
     setAgentError(null);
@@ -386,53 +419,78 @@ export default function App() {
     setAgentProgress(initialProgress);
 
     try {
-      const tasks = descriptors.map(({ patient, progressKey }) =>
-        (async () => {
-          try {
-            const response = await fetch(buildApiUrl("/api/run-agent"), {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                patients: [patient],
-                groundTruth: filteredGroundTruth,
-                instructions,
-                limit: 1,
-              }),
-            });
-            const payload = await response.json().catch(() => ({}));
-            if (!response.ok) {
-              throw new Error(
-                payload.detail ?? payload.error ?? "Agent run failed"
-              );
-            }
-            const responsePatients: AgentPatientResult[] =
-              payload.output?.patients ?? [];
-            if (responsePatients.length) {
-              setAgentPatients((prev) =>
-                mergeAgentPatientResults(prev, responsePatients)
-              );
-            }
-            setAgentResponses((prev) => [...prev, payload]);
-            setAgentProgress((prev) => ({
-              ...prev,
-              [progressKey]: { status: "success" },
-            }));
-          } catch (error) {
-            const message =
-              error instanceof Error ? error.message : "Agent run failed";
-            setAgentProgress((prev) => ({
-              ...prev,
-              [progressKey]: { status: "error", message },
-            }));
-            setAgentError(message);
+      for (const batch of batches) {
+        const batchPatients = batch.map((descriptor) => descriptor.patient);
+        try {
+          const response = await fetch(buildApiUrl("/api/run-agent"), {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              patients: batchPatients,
+              groundTruth: filteredGroundTruth,
+              instructions,
+              limit: AGENT_BATCH_SIZE,
+            }),
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            throw new Error(
+              payload.detail ?? payload.error ?? "Agent run failed"
+            );
           }
-        })()
-      );
-
-      await Promise.all(tasks);
+          const responsePatients: AgentPatientResult[] =
+            payload.output?.patients ?? [];
+          if (responsePatients.length) {
+            setAgentPatients((prev) =>
+              mergeAgentPatientResults(prev, responsePatients)
+            );
+          }
+          setAgentResponses((prev) => [...prev, payload]);
+          markProgress(
+            batch.map((descriptor) => descriptor.progressKey),
+            "success"
+          );
+        } catch (error) {
+          const message =
+            error instanceof Error ? error.message : "Agent run failed";
+          markProgress(
+            batch.map((descriptor) => descriptor.progressKey),
+            "error",
+            message
+          );
+          setAgentError(message);
+        }
+      }
     } finally {
       setRunningAgent(false);
     }
+  };
+
+  const downloadAgentWorkbook = () => {
+    if (!agentPatients.length) return;
+    const rows = agentPatients.map((entry, index) => {
+      const normalizedId = normalizePatientIdentifier(entry.patient_id);
+      const truth = normalizedId ? groundTruthMap[normalizedId] : undefined;
+      const numericProbability = Number(entry.stroke_probability);
+      const strokeProbability = Number.isFinite(numericProbability)
+        ? numericProbability
+        : entry.stroke_probability ?? "";
+      return {
+        Index: index + 1,
+        PatientID: normalizedId || `Patient ${index + 1}`,
+        Diagnosis: entry.diagnosis ?? "",
+        StrokeProbability: strokeProbability,
+        Reasoning: entry.reasoning ?? "",
+        Recommendation: entry.recommendation ?? "",
+        TrueStroke: truth ? truth["True Stroke?"] ?? "" : "",
+        StrokeRisk: truth ? truth["Stroke Risk"] ?? "" : "",
+      };
+    });
+    const workbook = XLSXUtils.book_new();
+    const worksheet = XLSXUtils.json_to_sheet(rows);
+    XLSXUtils.book_append_sheet(workbook, worksheet, "Agent Output");
+    const timestamp = new Date().toISOString().replace(/[:]/g, "-");
+    writeXlsxFile(workbook, `agent-output-${timestamp}.xlsx`);
   };
 
   return (
@@ -619,10 +677,7 @@ export default function App() {
                     <input
                       type="number"
                       min={rangeStart}
-                      max={Math.min(
-                        rangeStart + MAX_AGENT_PATIENTS - 1,
-                        Math.max(patients.length, 1)
-                      )}
+                      max={Math.max(patients.length, 1)}
                       value={rangeEnd}
                       onChange={(event) => {
                         const parsed = Number(event.target.value);
@@ -680,7 +735,8 @@ export default function App() {
 
               <div className="range-send-controls">
                 <p className="helper-text">
-                  Send this patient range (max {MAX_AGENT_PATIENTS})
+                  Send this patient range (auto-chunked into groups of{" "}
+                  {AGENT_BATCH_SIZE})
                 </p>
                 <div className="range-fields">
                   <label>
@@ -702,10 +758,7 @@ export default function App() {
                     <input
                       type="number"
                       min={rangeStart}
-                      max={Math.min(
-                        rangeStart + MAX_AGENT_PATIENTS - 1,
-                        Math.max(patients.length, 1)
-                      )}
+                      max={Math.max(patients.length, 1)}
                       value={rangeEnd}
                       onChange={(event) => {
                         const parsed = Number(event.target.value);
@@ -720,23 +773,32 @@ export default function App() {
 
               <div className="range-note">
                 Sending patients{" "}
-                {selectedRange.length ? `${rangeStart}-${rangeEnd}` : "-"} (up
-                to {MAX_AGENT_PATIENTS} per run).
-                <br />
-                Range selection is capped at {MAX_AGENT_PATIENTS} patients while
-                we address timeout limits.
+                {selectedRange.length ? `${rangeStart}-${rangeEnd}` : "-"} in
+                batches of up to {AGENT_BATCH_SIZE} patients. We automatically
+                queue sequential runs to cover the full selection.
               </div>
 
-              <button
-                type="button"
-                className="primary"
-                disabled={!hasPatients || runningAgent}
-                onClick={runAgent}
-              >
-                {runningAgent
-                  ? "Running agent..."
-                  : "Run agent on parsed patients"}
-              </button>
+              <div className="run-actions">
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={!hasPatients || runningAgent}
+                  onClick={runAgent}
+                >
+                  {runningAgent
+                    ? "Running agent..."
+                    : "Run agent on parsed patients"}
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  disabled={!canDownloadExcel || runningAgent}
+                  onClick={downloadAgentWorkbook}
+                >
+                  Download agent results (.xlsx)
+                </button>
+              </div>
+
               {agentError && (
                 <p className="status-message error">{agentError}</p>
               )}

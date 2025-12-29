@@ -11,6 +11,23 @@ from typing import Any, Mapping
 from agents import Agent, Runner
 
 DEFAULT_WORKFLOW_MODULE = "app.workflow_export"
+MAX_SESSION_TURNS = 40
+
+_SESSION_CONVERSATIONS: dict[str, list[dict[str, Any]]] = {}
+
+
+def _conversation_for(session_id: str | None) -> list[dict[str, Any]]:
+    if not session_id:
+        return []
+    return list(_SESSION_CONVERSATIONS.get(session_id, []))
+
+
+def _store_conversation(session_id: str, conversation: list[dict[str, Any]]) -> None:
+    if not session_id:
+        return
+    if len(conversation) > MAX_SESSION_TURNS:
+        conversation = conversation[-MAX_SESSION_TURNS:]
+    _SESSION_CONVERSATIONS[session_id] = conversation
 
 
 class WorkflowAgentError(RuntimeError):
@@ -63,17 +80,37 @@ def _build_workflow_context(payload_text: str) -> Any | None:
         return None
 
 
-async def execute_workflow(payload: Mapping[str, Any]) -> Any:
+async def execute_workflow(
+    payload: Mapping[str, Any], session_id: str | None = None
+) -> Any:
     """Run the exported workflow with the provided payload."""
 
     agent = _load_agent()
     payload_text = json.dumps(payload)
     context = _build_workflow_context(payload_text)
-    run_kwargs = {"input": payload_text}
+
+    user_message = {
+        "role": "user",
+        "content": [{"type": "input_text", "text": payload_text}],
+    }
+    conversation_history = _conversation_for(session_id)
+    baton = [*conversation_history, user_message]
+
+    run_kwargs = {"input": baton}
     if context is not None:
         run_kwargs["context"] = context
 
     result = await Runner.run(agent, **run_kwargs)
+
+    if session_id:
+        updated = [*baton]
+        new_items = getattr(result, "new_items", None)
+        if new_items:
+            for item in new_items:
+                to_input = getattr(item, "to_input_item", None)
+                if callable(to_input):
+                    updated.append(to_input())
+        _store_conversation(session_id, updated)
 
     final_output = getattr(result, "final_output", None)
     if final_output is not None:

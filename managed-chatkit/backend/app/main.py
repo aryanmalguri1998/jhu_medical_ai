@@ -10,7 +10,7 @@ from typing import Annotated, Any, Mapping
 
 import httpx
 import pandas as pd
-from fastapi import FastAPI, File, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field
@@ -183,7 +183,11 @@ async def sample_data() -> Mapping[str, Any]:
 
 
 @app.post("/api/run-agent")
-async def run_agent(payload: RunAgentRequest) -> Mapping[str, Any]:
+async def run_agent(
+    payload: RunAgentRequest,
+    request: Request,
+    response: Response,
+) -> Mapping[str, Any]:
     """Invoke the configured workflow with the prepared patient payload."""
 
     api_key = os.getenv("OPENAI_API_KEY")
@@ -198,13 +202,16 @@ async def run_agent(payload: RunAgentRequest) -> Mapping[str, Any]:
     limit = min(limit, MAX_AGENT_BATCH)
     trimmed_patients = patients[:limit]
 
+    user_id, cookie_value = resolve_user(request.cookies)
+    set_session_cookie(response, cookie_value)
+
     workflow_input = {
         "patients": trimmed_patients,
         "ground_truth": payload.ground_truth or [],
         "instructions": (payload.instructions or "").strip(),
     }
     try:
-        agent_output = await execute_workflow(workflow_input)
+        agent_output = await execute_workflow(workflow_input, session_id=user_id)
     except WorkflowAgentError as error:
         raise HTTPException(status_code=500, detail=str(error)) from error
     except Exception as error:  # pragma: no cover - bubble up to FastAPI handler
@@ -217,10 +224,17 @@ async def run_agent(payload: RunAgentRequest) -> Mapping[str, Any]:
 
 
 @app.post("/api/outcome-prompt")
-async def send_outcome_prompt(payload: OutcomePromptRequest) -> Mapping[str, Any]:
+async def send_outcome_prompt(
+    payload: OutcomePromptRequest,
+    request: Request,
+    response: Response,
+) -> Mapping[str, Any]:
     prompt = (payload.prompt or "").strip()
     if not prompt:
         raise HTTPException(status_code=400, detail="Outcome prompt must not be empty")
+
+    user_id, cookie_value = resolve_user(request.cookies)
+    set_session_cookie(response, cookie_value)
 
     body = {
         "patient_id": payload.patient_id,
@@ -233,7 +247,7 @@ async def send_outcome_prompt(payload: OutcomePromptRequest) -> Mapping[str, Any
     }
 
     try:
-        agent_output = await execute_workflow(body)
+        agent_output = await execute_workflow(body, session_id=user_id)
     except WorkflowAgentError as error:
         raise HTTPException(status_code=500, detail=str(error)) from error
     except Exception as error:  # pragma: no cover - surface unexpected failures
@@ -242,20 +256,25 @@ async def send_outcome_prompt(payload: OutcomePromptRequest) -> Mapping[str, Any
     return {"status": "sent", "agentResponse": agent_output}
 
 
+def set_session_cookie(response: Response, cookie_value: str | None = None) -> None:
+    if not cookie_value:
+        return
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=cookie_value,
+        max_age=SESSION_COOKIE_MAX_AGE_SECONDS,
+        httponly=True,
+        samesite="lax",
+        secure=is_prod(),
+        path="/",
+    )
+
+
 def respond(
     payload: Mapping[str, Any], status_code: int, cookie_value: str | None = None
 ) -> JSONResponse:
     response = JSONResponse(payload, status_code=status_code)
-    if cookie_value:
-        response.set_cookie(
-            key=SESSION_COOKIE_NAME,
-            value=cookie_value,
-            max_age=SESSION_COOKIE_MAX_AGE_SECONDS,
-            httponly=True,
-            samesite="lax",
-            secure=is_prod(),
-            path="/",
-        )
+    set_session_cookie(response, cookie_value)
     return response
 
 

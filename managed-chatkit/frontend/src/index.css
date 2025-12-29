@@ -507,6 +507,21 @@ button.secondary {
   color: var(--ink);
 }
 
+.run-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+}
+
+.run-actions button {
+  flex: 1 1 260px;
+}
+
+.run-actions button.primary {
+  width: auto;
+}
+
 .link {
   border: none;
   background: none;
